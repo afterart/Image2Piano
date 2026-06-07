@@ -14,6 +14,7 @@ import streamlit as st
 warnings.filterwarnings("ignore")
 
 # --- CORE CONFIGURATION ---
+# Standardized palette configuration
 color_palette = {
     "Deep Red": {"rgb": (139, 0, 0), "freq": 138.59},
     "Red": {"rgb": (255, 0, 0), "freq": 155.56},
@@ -39,9 +40,16 @@ def generate_grand_piano(frequency):
     audio_ints = (final_wave * 32767 / np.max(np.abs(final_wave))).astype(np.int16)
     return AudioSegment(audio_ints.tobytes(), frame_rate=sample_rate, sample_width=2, channels=1)
 
+def get_perceptual_distance(rgb1, rgb2):
+    """Calculates weighted human-perceptual distance between two RGB vectors."""
+    r_diff = rgb1[0] - rgb2[0]
+    g_diff = rgb1[1] - rgb2[1]
+    b_diff = rgb1[2] - rgb2[2]
+    return (2 * r_diff**2) + (4 * g_diff**2) + (3 * b_diff**2)
+
 # --- USER INTERFACE ---
 st.title("🎹 Image-to-Piano Sequencer")
-st.write("Upload 8 images to generate a synchronized audio-visual performance.")
+st.write("Upload 8 images to generate a synchronized audio-visual performance with inset tracking.")
 
 uploaded_files = st.file_uploader("1. Upload 8 Images", type=["png", "jpg", "jpeg"], accept_multiple_files=True)
 
@@ -50,19 +58,30 @@ if st.button("2. Generate Performance", type="primary"):
         st.error("Error: Please upload at least 8 images.")
     else:
         with st.spinner("Processing visual assets and compiling audio..."):
-            # Sort files systematically by name
             uploaded_files = sorted(uploaded_files, key=lambda x: x.name)
             
             intro_audio = AudioSegment.empty()
             melody_unit = AudioSegment.empty()
-            detected_colors = []
+            
+            # Tracking list to preserve original images and their assigned colors
+            pipeline_data = []
 
             for file_info in uploaded_files[:8]:
-                # Streamlit uploaded files can be read directly by PIL
                 img = Image.open(file_info).convert('RGB')
                 avg_pixel = img.resize((1, 1)).getpixel((0, 0))
-                color_name = min(color_palette.keys(), key=lambda x: sum((s - q) ** 2 for s, q in zip(color_palette[x]["rgb"], avg_pixel)))
-                detected_colors.append(color_name)
+                
+                # Correction: Perceptual color matching instead of naive Euclidean distance
+                color_name = min(
+                    color_palette.keys(), 
+                    key=lambda x: get_perceptual_distance(color_palette[x]["rgb"], avg_pixel)
+                )
+                
+                # Retain data matrix for video compilation loop
+                pipeline_data.append({
+                    "image": img,
+                    "color_name": color_name,
+                    "rgb": color_palette[color_name]["rgb"]
+                })
 
                 v_fp = io.BytesIO()
                 gTTS(color_name).write_to_fp(v_fp)
@@ -82,24 +101,55 @@ if st.button("2. Generate Performance", type="primary"):
             final_melody.export(melody_p, format="wav")
             intro_audio.export(intro_p, format="wav")
 
-            # --- VIDEO GENERATION ---
+            # --- VIDEO GENERATION WITH INSET WINDOWS ---
             video_p = os.path.join(temp_dir, f"vid_{timestamp}.mp4")
             temp_silent = os.path.join(temp_dir, f"silent_{timestamp}.mp4")
 
+            # 1.25 frames per second matches the 0.8 second tone duration exactly
             out = cv2.VideoWriter(temp_silent, cv2.VideoWriter_fourcc(*'mp4v'), 1.25, (1280, 720))
-            for c in (detected_colors * 2):
-                rgb = color_palette[c]["rgb"]
+            
+            # Repeat sequence twice to match final loops
+            for data_node in (pipeline_data * 2):
+                c_name = data_node["color_name"]
+                rgb = data_node["rgb"]
+                orig_img = data_node["image"]
+                
+                # Render the base background color frame (OpenCV uses BGR format)
                 frame = np.full((720, 1280, 3), (rgb[2], rgb[1], rgb[0]), dtype=np.uint8)
-                cv2.putText(frame, c.upper(), (100, 360), cv2.FONT_HERSHEY_DUPLEX, 3, (255, 255, 255), 4)
+                
+                # Format original source asset as a 16:9 box inset thumbnail
+                inset_w, inset_h = 320, 180
+                cv2_img = cv2.cvtColor(np.array(orig_img), cv2.COLOR_RGB2BGR)
+                inset_thumb = cv2.resize(cv2_img, (inset_w, inset_h), interpolation=cv2.INTER_AREA)
+                
+                # Define placement coordinates (Top-Right corner with 40px padding offset)
+                y_offset = 40
+                x_offset = 1280 - inset_w - 40
+                
+                # Add white border structure around the asset thumbnail
+                cv2.rectangle(
+                    frame, 
+                    (x_offset - 2, y_offset - 2), 
+                    (x_offset + inset_w + 2, y_offset + inset_h + 2), 
+                    (255, 255, 255), 
+                    2
+                )
+                
+                # Inject the source image asset matrix directly into the background matrix frame
+                frame[y_offset:y_offset+inset_h, x_offset:x_offset+inset_w] = inset_thumb
+                
+                # Draw text identifier overlay
+                cv2.putText(frame, c_name.upper(), (100, 360), cv2.FONT_HERSHEY_DUPLEX, 3, (255, 255, 255), 4)
                 out.write(frame)
+                
             out.release()
 
+            # Compile audio and video streams via server binary
             subprocess.run([
                 'ffmpeg', '-y', '-i', temp_silent, '-i', melody_p, 
                 '-c:v', 'libx264', '-c:a', 'aac', '-shortest', video_p
             ], capture_output=True)
 
-            # Display outputs directly on screen
             st.success("✨ Generation Complete!")
             
             st.subheader("Intro Performance")
