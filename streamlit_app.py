@@ -13,8 +13,7 @@ import streamlit as st
 
 warnings.filterwarnings("ignore")
 
-# --- CORE CONFIGURATION ---
-# Standardized palette configuration
+# --- CORE CONFIGURATION (Standardized Palette) ---
 color_palette = {
     "Deep Red": {"rgb": (139, 0, 0), "freq": 138.59},
     "Red": {"rgb": (255, 0, 0), "freq": 155.56},
@@ -40,16 +39,56 @@ def generate_grand_piano(frequency):
     audio_ints = (final_wave * 32767 / np.max(np.abs(final_wave))).astype(np.int16)
     return AudioSegment(audio_ints.tobytes(), frame_rate=sample_rate, sample_width=2, channels=1)
 
-def get_perceptual_distance(rgb1, rgb2):
-    """Calculates weighted human-perceptual distance between two RGB vectors."""
-    r_diff = rgb1[0] - rgb2[0]
-    g_diff = rgb1[1] - rgb2[1]
-    b_diff = rgb1[2] - rgb2[2]
-    return (2 * r_diff**2) + (4 * g_diff**2) + (3 * b_diff**2)
+def rgb_to_lab(rgb):
+    """Converts standard RGB coordinates to the perceptually uniform CIELAB space."""
+    # Normalize channels to [0, 1]
+    r, g, b = [x / 255.0 for x in rgb]
+    
+    # Pivot to XYZ space using standard sRGB transformation matrix
+    r = ((r + 0.055) / 1.055) ** 2.4 if r > 0.04045 else r / 12.92
+    g = ((g + 0.055) / 1.055) ** 2.4 if g > 0.04045 else g / 12.92
+    b = ((b + 0.055) / 1.055) ** 2.4 if b > 0.04045 else b / 12.92
+    
+    x = r * 0.4124 + g * 0.3576 + b * 0.1805
+    y = r * 0.2126 + g * 0.7152 + b * 0.0722
+    z = r * 0.0193 + g * 0.1192 + b * 0.9505
+    
+    # Normalize for white point reference (D65 standard)
+    x /= 0.95047
+    y /= 1.00000
+    z /= 1.08883
+    
+    fx = x ** (1/3) if x > 0.008856 else (7.787 * x) + (16 / 116)
+    fy = y ** (1/3) if y > 0.008856 else (7.787 * y) + (16 / 116)
+    fz = z ** (1/3) if z > 0.008856 else (7.787 * z) + (16 / 116)
+    
+    l = (116 * fy) - 16
+    a = 500 * (fx - fy)
+    return (l, a, 200 * (fy - fz))
+
+def extract_dominant_rgb(pil_img):
+    """Exposes true dominant color using a quantized sampling matrix instead of global averaging."""
+    # Downsample slightly to smooth noise while keeping spatial variance
+    thumb = pil_img.resize((50, 50), Image.Resampling.BILINEAR)
+    pixels = np.array(thumb).reshape(-1, 3)
+    
+    # Quantize colors to eliminate subtle shade variation noise
+    quantized = (pixels // 32) * 32
+    
+    # Compute the statistical mode (most frequent color bin)
+    colors, counts = np.unique(quantized, axis=0, return_counts=True)
+    dominant_index = np.argmax(counts)
+    
+    # Return raw average of original pixels falling into that dominant bin
+    matched_pixels = pixels[np.all(quantized == colors[dominant_index], axis=1)]
+    return tuple(np.mean(matched_pixels, axis=0).astype(int))
+
+# Convert the reference palette definitions to CIELAB values once during startup
+lab_palette = {name: rgb_to_lab(data["rgb"]) for name, data in color_palette.items()}
 
 # --- USER INTERFACE ---
-st.title("🎹 Image-to-Piano Sequencer")
-st.write("Upload 8 images to generate a synchronized audio-visual performance with inset tracking.")
+st.title("🎹 Perceptual Image-to-Piano Sequencer")
+st.write("Resolves color extraction skew using uniform CIELAB color-distance parameters.")
 
 uploaded_files = st.file_uploader("1. Upload 8 Images", type=["png", "jpg", "jpeg"], accept_multiple_files=True)
 
@@ -57,26 +96,26 @@ if st.button("2. Generate Performance", type="primary"):
     if not uploaded_files or len(uploaded_files) < 8:
         st.error("Error: Please upload at least 8 images.")
     else:
-        with st.spinner("Processing visual assets and compiling audio..."):
+        with st.spinner("Executing perceptual classification updates..."):
             uploaded_files = sorted(uploaded_files, key=lambda x: x.name)
             
             intro_audio = AudioSegment.empty()
             melody_unit = AudioSegment.empty()
-            
-            # Tracking list to preserve original images and their assigned colors
             pipeline_data = []
 
             for file_info in uploaded_files[:8]:
                 img = Image.open(file_info).convert('RGB')
-                avg_pixel = img.resize((1, 1)).getpixel((0, 0))
                 
-                # Correction: Perceptual color matching instead of naive Euclidean distance
+                # Correction 1: Extract real dominant color instead of a flat arithmetic mean blend
+                dominant_rgb = extract_dominant_rgb(img)
+                dominant_lab = rgb_to_lab(dominant_rgb)
+                
+                # Correction 2: Map distance via uniform CIELAB vectors to match human vision
                 color_name = min(
-                    color_palette.keys(), 
-                    key=lambda x: get_perceptual_distance(color_palette[x]["rgb"], avg_pixel)
+                    color_palette.keys(),
+                    key=lambda x: sum((a - b) ** 2 for a, b in zip(lab_palette[x], dominant_lab))
                 )
                 
-                # Retain data matrix for video compilation loop
                 pipeline_data.append({
                     "image": img,
                     "color_name": color_name,
@@ -101,32 +140,27 @@ if st.button("2. Generate Performance", type="primary"):
             final_melody.export(melody_p, format="wav")
             intro_audio.export(intro_p, format="wav")
 
-            # --- VIDEO GENERATION WITH INSET WINDOWS ---
             video_p = os.path.join(temp_dir, f"vid_{timestamp}.mp4")
             temp_silent = os.path.join(temp_dir, f"silent_{timestamp}.mp4")
 
-            # 1.25 frames per second matches the 0.8 second tone duration exactly
             out = cv2.VideoWriter(temp_silent, cv2.VideoWriter_fourcc(*'mp4v'), 1.25, (1280, 720))
             
-            # Repeat sequence twice to match final loops
             for data_node in (pipeline_data * 2):
                 c_name = data_node["color_name"]
                 rgb = data_node["rgb"]
                 orig_img = data_node["image"]
                 
-                # Render the base background color frame (OpenCV uses BGR format)
+                # Render clear background frame
                 frame = np.full((720, 1280, 3), (rgb[2], rgb[1], rgb[0]), dtype=np.uint8)
                 
-                # Format original source asset as a 16:9 box inset thumbnail
+                # Build localized 16:9 thumbnail picture-in-picture box
                 inset_w, inset_h = 320, 180
                 cv2_img = cv2.cvtColor(np.array(orig_img), cv2.COLOR_RGB2BGR)
                 inset_thumb = cv2.resize(cv2_img, (inset_w, inset_h), interpolation=cv2.INTER_AREA)
                 
-                # Define placement coordinates (Top-Right corner with 40px padding offset)
                 y_offset = 40
                 x_offset = 1280 - inset_w - 40
                 
-                # Add white border structure around the asset thumbnail
                 cv2.rectangle(
                     frame, 
                     (x_offset - 2, y_offset - 2), 
@@ -134,17 +168,13 @@ if st.button("2. Generate Performance", type="primary"):
                     (255, 255, 255), 
                     2
                 )
-                
-                # Inject the source image asset matrix directly into the background matrix frame
                 frame[y_offset:y_offset+inset_h, x_offset:x_offset+inset_w] = inset_thumb
                 
-                # Draw text identifier overlay
                 cv2.putText(frame, c_name.upper(), (100, 360), cv2.FONT_HERSHEY_DUPLEX, 3, (255, 255, 255), 4)
                 out.write(frame)
                 
             out.release()
 
-            # Compile audio and video streams via server binary
             subprocess.run([
                 'ffmpeg', '-y', '-i', temp_silent, '-i', melody_p, 
                 '-c:v', 'libx264', '-c:a', 'aac', '-shortest', video_p
