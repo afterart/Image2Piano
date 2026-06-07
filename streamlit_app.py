@@ -41,10 +41,8 @@ def generate_grand_piano(frequency):
 
 def rgb_to_lab(rgb):
     """Converts standard RGB coordinates to the perceptually uniform CIELAB space."""
-    # Normalize channels to [0, 1]
     r, g, b = [x / 255.0 for x in rgb]
     
-    # Pivot to XYZ space using standard sRGB transformation matrix
     r = ((r + 0.055) / 1.055) ** 2.4 if r > 0.04045 else r / 12.92
     g = ((g + 0.055) / 1.055) ** 2.4 if g > 0.04045 else g / 12.92
     b = ((b + 0.055) / 1.055) ** 2.4 if b > 0.04045 else b / 12.92
@@ -53,7 +51,6 @@ def rgb_to_lab(rgb):
     y = r * 0.2126 + g * 0.7152 + b * 0.0722
     z = r * 0.0193 + g * 0.1192 + b * 0.9505
     
-    # Normalize for white point reference (D65 standard)
     x /= 0.95047
     y /= 1.00000
     z /= 1.08883
@@ -62,24 +59,17 @@ def rgb_to_lab(rgb):
     fy = y ** (1/3) if y > 0.008856 else (7.787 * y) + (16 / 116)
     fz = z ** (1/3) if z > 0.008856 else (7.787 * z) + (16 / 116)
     
-    l = (116 * fy) - 16
-    a = 500 * (fx - fy)
-    return (l, a, 200 * (fy - fz))
+    return ((116 * fy) - 16, 500 * (fx - fy), 200 * (fy - fz))
 
 def extract_dominant_rgb(pil_img):
     """Exposes true dominant color using a quantized sampling matrix instead of global averaging."""
-    # Downsample slightly to smooth noise while keeping spatial variance
     thumb = pil_img.resize((50, 50), Image.Resampling.BILINEAR)
     pixels = np.array(thumb).reshape(-1, 3)
     
-    # Quantize colors to eliminate subtle shade variation noise
     quantized = (pixels // 32) * 32
-    
-    # Compute the statistical mode (most frequent color bin)
     colors, counts = np.unique(quantized, axis=0, return_counts=True)
     dominant_index = np.argmax(counts)
     
-    # Return raw average of original pixels falling into that dominant bin
     matched_pixels = pixels[np.all(quantized == colors[dominant_index], axis=1)]
     return tuple(np.mean(matched_pixels, axis=0).astype(int))
 
@@ -106,11 +96,11 @@ if st.button("2. Generate Performance", type="primary"):
             for file_info in uploaded_files[:8]:
                 img = Image.open(file_info).convert('RGB')
                 
-                # Correction 1: Extract real dominant color instead of a flat arithmetic mean blend
+                # Extract real dominant color instead of a flat arithmetic mean blend
                 dominant_rgb = extract_dominant_rgb(img)
                 dominant_lab = rgb_to_lab(dominant_rgb)
                 
-                # Correction 2: Map distance via uniform CIELAB vectors to match human vision
+                # Map distance via uniform CIELAB vectors to match human vision
                 color_name = min(
                     color_palette.keys(),
                     key=lambda x: sum((a - b) ** 2 for a, b in zip(lab_palette[x], dominant_lab))
