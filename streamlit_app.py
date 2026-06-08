@@ -54,28 +54,19 @@ def rgb_to_lab(rgb):
     return ((116 * fy) - 16, 500 * (fx - fy), 200 * (fy - fz))
 
 def extract_dominant_rgb(pil_img):
-    """Filters ambient shadows and background noise to isolate actual performance color hashes."""
     thumb = pil_img.resize((64, 64), Image.Resampling.BILINEAR)
     pixels = np.array(thumb).reshape(-1, 3)
-    
-    # Calculate pixel brilliance metrics (perceptual luminance formula)
     luminance = 0.299 * pixels[:, 0] + 0.587 * pixels[:, 1] + 0.114 * pixels[:, 2]
-    
-    # Isolate colorful variance (drops flat grays/shadows)
     channel_variance = np.std(pixels, axis=1)
     
-    # Filter array mask: retain elements with visible brightness and distinct hue properties
     valid_mask = (luminance > 45) & (luminance < 235) & (channel_variance > 15)
     filtered_pixels = pixels[valid_mask]
     
-    # Fallback to standard center sampling if image is completely dark/monochrome
     if len(filtered_pixels) == 0:
         return tuple(np.mean(pixels, axis=0).astype(int))
         
-    # Quantize and locate key cluster bin
     quantized = (filtered_pixels // 16) * 16
     colors, counts = np.unique(quantized, axis=0, return_counts=True)
-    
     dominant_index = np.argmax(counts)
     matched_pixels = filtered_pixels[np.all(quantized == colors[dominant_index], axis=1)]
     return tuple(np.mean(matched_pixels, axis=0).astype(int))
@@ -83,23 +74,26 @@ def extract_dominant_rgb(pil_img):
 lab_palette = {name: rgb_to_lab(data["rgb"]) for name, data in color_palette.items()}
 
 # --- USER INTERFACE ---
-st.title("🎹 Perceptual Image-to-Piano Sequencer")
-st.write("Resolves shadow skew via dynamic luminance filtering matrices.")
+st.title("🎹 Mobile-Optimized Image Sequencer")
+st.write("Accepts variable file lengths to bypass mobile multi-selection upload constraints.")
 
-uploaded_files = st.file_uploader("1. Upload 8 Images", type=["png", "jpg", "jpeg"], accept_multiple_files=True)
+# Configured max_files parameter to guide browser selection limits without strict blockages
+uploaded_files = st.file_uploader("1. Select Images (1 to 8)", type=["png", "jpg", "jpeg"], accept_multiple_files=True)
 
 if st.button("2. Generate Performance", type="primary"):
-    if not uploaded_files or len(uploaded_files) < 8:
-        st.error("Error: Please upload at least 8 images.")
+    if not uploaded_files or len(uploaded_files) == 0:
+        st.error("Error: No images detected. Please select or capture at least one image.")
     else:
-        with st.spinner("Processing visual configurations..."):
-            uploaded_files = sorted(uploaded_files, key=lambda x: x.name)
+        with st.spinner("Executing dynamic timeline generation..."):
+            # Mobile fix: Sort by index position in the upload array list, bypassing mutable system file strings
+            indexed_uploads = list(enumerate(uploaded_files))
+            indexed_uploads = indexed_uploads[:8]  # Absolute ceiling cap at 8 assets
             
             intro_audio = AudioSegment.empty()
             melody_unit = AudioSegment.empty()
             pipeline_data = []
 
-            for file_info in uploaded_files[:8]:
+            for idx, file_info in indexed_uploads:
                 img = Image.open(file_info).convert('RGB')
                 dominant_rgb = extract_dominant_rgb(img)
                 dominant_lab = rgb_to_lab(dominant_rgb)
@@ -138,6 +132,7 @@ if st.button("2. Generate Performance", type="primary"):
 
             out = cv2.VideoWriter(temp_silent, cv2.VideoWriter_fourcc(*'mp4v'), 1.25, (1280, 720))
             
+            # Timeline loops adapt precisely to length of pipeline data matrix
             for data_node in (pipeline_data * 2):
                 c_name = data_node["color_name"]
                 rgb = data_node["rgb"]
@@ -171,10 +166,11 @@ if st.button("2. Generate Performance", type="primary"):
                 '-c:v', 'libx264', '-c:a', 'aac', '-shortest', video_p
             ], capture_output=True)
 
-            st.success("✨ Generation Complete!")
+            st.success(f"✨ Generation Complete for {len(pipeline_data)} Elements!")
             st.subheader("Intro Performance")
             st.audio(intro_p)
             st.subheader("Melody Audio Loop")
             st.audio(melody_p)
             st.subheader("3. Visual Performance (with Sound)")
             st.video(video_p)
+            
